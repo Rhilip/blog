@@ -1,0 +1,202 @@
+---
+title: 扩展FastRoute使其支持Middleware
+date: 2020-05-11 02:50:21
+categories: PHP
+tags: [fastroute,middleware,ridpt]
+permalink: /archives/1237/
+---
+
+很久之前在写RidPT的时候，我就在考虑使用社区中更为优质的组件来替换原 [MixPHP](http://mixphp.cn/) 中自带的一些组件。而路由部分中 [symfony/routing](https://github.com/symfony/routing) 可能是我之前最想尝试的，因为目前RidPT中使用Symfony/HttpFoundation构建了请求和响应组件~~（甚至有段时间我觉得我在另外构建一个symfony，而且还没别人官方的好，其对swoole异步/协程的支持也均未测试）~~。然而接触文档之后，发现配置起来相当麻烦，远不如我在symfony应用中使用Annotations方法来的简便（因为杂活都让框架给做了）。
+
+此外，对照文档，我们需要首先根据Request构造新的RequestContext对象，然后传入UrlMatcher并调用其match方法。虽然swoole常驻模式可以减少前面路由规则生成部分，但是后续对请求处理的部分，依然需要构造新的对象，造成无端的时间和空间浪费。且Symfony中并没有Middleware的概念，而是使用Event Dispatch的整体流程对请求-响应进行调度，为此再引入多个symfony组件似乎得不偿失。
+
+```php
+use App\Controller\BlogController;
+use Symfony\Component\Routing\Generator\UrlGenerator;
+use Symfony\Component\Routing\Matcher\UrlMatcher;
+use Symfony\Component\Routing\RequestContext;
+use Symfony\Component\Routing\Route;
+use Symfony\Component\Routing\RouteCollection;
+
+$route = new Route('/blog/{slug}', ['_controller' => BlogController::class]);
+$routes = new RouteCollection();
+$routes->add('blog_show', $route);
+
+$context = new RequestContext();
+
+// Routing can match routes with incoming requests
+$matcher = new UrlMatcher($routes, $context);
+$parameters = $matcher->match('/blog/lorem-ipsum');
+// $parameters = [
+//     '_controller' => 'App\Controller\BlogController',
+//     'slug' => 'lorem-ipsum',
+//     '_route' => 'blog_show'
+// ]
+```
+
+之后我便一直在关注 [nikic/FastRoute](https://github.com/nikic/FastRoute) 的东西。但一开始FastRoute本身不太了解，认为很难将FastRoute和目前应用中中间件部分相结合，另一方面就是之前有些排斥直接使用函数返回的形式对路由进行定义~~（真香）~~。于是找了一些基于FastRoute的扩展repo来学习，例如：
+
+- https://route.thephpleague.com/
+- easy-swoole的http组件、hyperf的路由组件等基于swoole框架的路由组件
+
+然而`league/route`的实现基于PSR-7 HTTP Message，已有的`Symfony\Component\HttpFoundation\{Request,Response}`都不是相关继承实现，而且内部较为复杂，一时难以理解。而其他swoole框架的虽稍好理解，但也很难直接的拿来主义。就这样搁置了一阵子。
+
+-----------------
+
+这段时间正好有些空闲，对原有依赖注入部分进行了替换（改成PHP-DI），便重新拾起了这一部分，看看能不能有更好的方法将FastRoute与项目进行联系。
+
+回到FastRoute的官方示例中，
+
+```php
+require '/path/to/vendor/autoload.php';
+
+$dispatcher = FastRoute\simpleDispatcher(function(FastRoute\RouteCollector $r) {
+    $r->addRoute('GET', '/users', 'get_all_users_handler');
+    // {id} must be a number (\d+)
+    $r->addRoute('GET', '/user/{id:\d+}', 'get_user_handler');
+    // The /{title} suffix is optional
+    $r->addRoute('GET', '/articles/{id:\d+}[/{title}]', 'get_article_handler');
+});
+
+// Fetch method and URI from somewhere
+$httpMethod = $_SERVER['REQUEST_METHOD'];
+$uri = $_SERVER['REQUEST_URI'];
+
+// Strip query string (?foo=bar) and decode URI
+if (false !== $pos = strpos($uri, '?')) {
+    $uri = substr($uri, 0, $pos);
+}
+$uri = rawurldecode($uri);
+
+$routeInfo = $dispatcher->dispatch($httpMethod, $uri);
+switch ($routeInfo[0]) {
+    case FastRoute\Dispatcher::NOT_FOUND:
+        // ... 404 Not Found
+        break;
+    case FastRoute\Dispatcher::METHOD_NOT_ALLOWED:
+        $allowedMethods = $routeInfo[1];
+        // ... 405 Method Not Allowed
+        break;
+    case FastRoute\Dispatcher::FOUND:
+        $handler = $routeInfo[1];
+        $vars = $routeInfo[2];
+        // ... call $handler with $vars
+        break;
+}
+```
+
+并结合一些issue，我才知道，我对handler本身的理解存在偏差，一开始我以为handler只能存放类似 `[AbstractController::class,'action']`的动作，但是其实并不是这样的。
+
+FastRoute在返回的`$routeInfo[1]`中会将定义路由时 `addRoute($method,$path,$handler)`的第三个参数原模原样返回。在其issue的 [#186](https://github.com/nikic/FastRoute/issues/186#issuecomment-503547751)，[#147](https://github.com/nikic/FastRoute/issues/147#issuecomment-338377748) 中，我觉得我找到了相应添加middleware的方法。
+
+[Nevraxe/Cervo](https://github.com/Nevraxe/Cervo/blob/5.0/src/Router.php)在其Router对象中，对FastRoute进行了进一步封装，但我觉得稍有过度。直接对原 `FastRoute\RouteCollector` 进行继承扩展似乎更为合适。最终结果如下：
+
+```php
+<?php
+   
+namespace Rid\Http\Route;
+
+use FastRoute\RouteCollector as FastRouteCollector;
+
+/**
+ * Extend FastRoute\RouteCollector, So we can support middleware.
+ *
+ * Class RouteCollector
+ * @package Rid\Http\Route
+ */
+class RouteCollector extends FastRouteCollector
+{
+    /** @var array List of middlewares called using the addMiddleware() method. */
+    private array $currentMiddlewares = [];
+
+    /**
+     * Encapsulate all the routes that are added from $func(Router) with this middleware.
+     *
+     * If the return value of the middleware is false, throws a RouteMiddlewareFailedException.
+     *
+     * @param string|string[] $middlewareClass The middleware to use
+     * @param callable $func
+     */
+    public function addMiddleware($middlewareClass, callable $func): void
+    {
+        array_push($this->currentMiddlewares, ...(array)$middlewareClass);
+        $func($this);
+        array_pop($this->currentMiddlewares);
+    }
+
+    public function addRoute($httpMethod, $route, $handler)
+    {
+        $handler['middlewares'] = $this->currentMiddlewares;
+        parent::addRoute($httpMethod, $route, $handler); // TODO: Change the autogenerated stub
+    }
+}
+```
+
+从中可以看到，我增加了一个`addMiddleware`方法，并依此扩展了原`addRoute`方法。在此基础上即可生成对应的可返回中间件的FastRoute对象。
+
+```php
+$dispatcher = \FastRoute\simpleDispatcher($route_def, [
+            'routeCollector' => \Rid\Http\Route\RouteCollector::class,
+        ]);
+
+$dispatcher->dispatch($method, $path);
+switch ($routeInfo[0]) {
+    case \FastRoute\Dispatcher::FOUND:
+        $handler = $routeInfo[1];
+        $vars = $routeInfo[2];
+        // 执行中间件和控制器，并返回结果
+        return $this->runWithMiddleware([$handler[0], $handler[1]], $handler['middlewares']);
+    case \FastRoute\Dispatcher::METHOD_NOT_ALLOWED:
+        $allowedMethods = $routeInfo[1];
+        .....
+        break;
+    case \FastRoute\Dispatcher::NOT_FOUND:
+    default:
+        .....
+        break;
+}
+```
+
+而对应路由配置文件如下：
+
+```php
+<?php
+
+use Rid\Http\Route\RouteCollector;
+
+return function (RouteCollector $r) {   
+    $r->addMiddleware([
+        // 增加全局Middleware
+    ], function (RouteCollector $r) {
+        // 一些不需要中间件保护的路由
+        $r->get('/maintenance', [\App\Controllers\MaintenanceController::class, 'index']);
+
+        // 需要额外中间件保护的路由
+        $r->addMiddleware(\App\Middleware\AuthMiddleware::class, function (RouteCollector $r) {
+            // 增加单个路由规则
+            $r->get('/test', [\App\Controllers\TestController::class, 'index']);
+
+            // 增加路由组规则
+            $r->addGroup('/links', function (RouteCollector $r) {
+                $r->addRoute(['GET', 'POST'], '/apply', [\App\Controllers\LinksController::class, 'apply']);
+            });
+
+        // 增加路由组规则
+        $r->addGroup('/api', function (RouteCollector $r) {
+            // 增加路由组内路由组规则
+            $r->addGroup('/v1', function (RouteCollector $r) {
+                // 增加组内中间件保护
+                $r->addMiddleware([
+                    \App\Middleware\AuthMiddleware::class,
+                    \App\Middleware\ApiMiddleware::class
+                ], function (RouteCollector $r) {
+                    $r->addGroup('/torrent', function (RouteCollector $r) {
+                        $r->post('/bookmark', [\App\Controllers\Api\v1\TorrentController::class, 'bookmark']);
+                    });
+                });
+            });
+        });
+    });
+};
+```
+
