@@ -2,7 +2,7 @@
 title: IYUU GUI项目实现过程及下一步计划
 date: 2020-07-30 02:31:00
 categories: javascript
-tags: [PT,typescript,iyuu,electron,element,iyuu gui]
+tags: [PT,typescript,iyuu,electron,element]
 permalink: /archives/1250/
 ---
 

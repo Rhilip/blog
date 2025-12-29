@@ -2,7 +2,7 @@
 title: R酱的Userscript笔记（2）： 新手入门篇
 date: 2018-05-26 15:17:00
 categories: userscript
-tags: [userscirpt,ecmascript6]
+tags: [userscript,ecmascript6]
 permalink: /archives/903/
 ---
 

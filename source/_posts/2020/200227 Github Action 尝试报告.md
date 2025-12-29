@@ -2,7 +2,7 @@
 title: Github Action 尝试报告
 date: 2020-02-27 13:57:16
 categories: knowledge
-tags: [github,vue,github action,gh-page,crontab,coverage,phpunit]
+tags: [Github,vue,github action,gh-page,crontab,coverage,phpunit]
 permalink: /archives/1201/
 ---
 

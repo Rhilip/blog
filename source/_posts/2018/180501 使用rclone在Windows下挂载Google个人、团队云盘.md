@@ -5,7 +5,7 @@ categories:
  - Knowledge
 tags: 
  - rclone
- - windows
+ - Windows
  - mount
  - gdrive
 permalink: /archives/874/

@@ -5,7 +5,7 @@ categories:
  - PT
  - [Coding, Python]
 tags: 
- - ptgen
+ - pt-gen
 permalink: /archives/800/
 ---
 

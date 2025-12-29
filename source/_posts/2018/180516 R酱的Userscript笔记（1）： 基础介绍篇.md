@@ -2,7 +2,7 @@
 title: R酱的Userscript笔记（1）： 基础介绍篇
 date: 2018-05-16 14:31:00
 categories: userscript
-tags: [Tampermonkey,userscirpt,greasymonkey,copyright]
+tags: [Tampermonkey,userscript,greasymonkey,copyright]
 permalink: /archives/898/
 ---
 
